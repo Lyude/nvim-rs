@@ -31,7 +31,7 @@ bench = false
 rmp = "0.8.9"
 rmpv = "0.4.3"
 log = "0.4.8"
-async-trait = "0.1.22"
+async-trait = "0.1.50"
 futures = { version = "0.3.1", features = ["io-compat"] }
 tokio = { version = "1.1.1", features = ["full"] , optional = true}
 tokio-util = { version = "0.6.3", features = ["compat"], optional = true }
