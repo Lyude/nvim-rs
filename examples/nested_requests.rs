@@ -97,19 +97,17 @@ impl Handler for NeovimHandler {
     args: Vec<Value>,
     _neovim: Neovim<Compat<ChildStdin>>,
   ) {
-    eprintln!("Handling notification {}", name);
     match name.as_ref() {
       "set_froodle" => {
-        let s =args[0].as_str().unwrap().to_string();
-        *self.froodle.lock().await = s
+        *self.froodle.lock().await = args[0].as_str().unwrap().to_string()
       }
       _ => {}
     };
   }
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn nested_requests() {
+#[tokio::main(basic_scheduler)]
+async fn main() {
   let rs = r#"exe ":fun M(timer) 
       call rpcnotify(1, 'set_froodle', rpcrequest(1, 'req', 'y'))
     endfun""#;
@@ -122,7 +120,7 @@ async fn nested_requests() {
     froodle: froodle.clone(),
   };
 
-  let (nvim, io_handler, _child) = create::new_child_cmd(
+  let (nvim, io, methods, _child) = create::new_child_cmd(
     Command::new(NVIMPATH).args(&[
       "-u",
       "NONE",
@@ -147,9 +145,14 @@ async fn nested_requests() {
 
   // The 2nd timer closes the channel, which will be returned as an error from
   // the io handler. We only fail the test if we got another error
-  if let Err(err) = io_handler.await.unwrap() {
+  let (name, res) = select! {
+    r_m = methods.fuse() => ("methods", r_m),
+    r_io = io.fuse() => ("io", r_io),
+  };
+
+  if let Err(err) = res {
     if !err.is_channel_closed() {
-      panic!("{}", err);
+      panic!("Error in task '{}': '{:?}'", name, err);
     }
   }
 
