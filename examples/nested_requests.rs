@@ -1,22 +1,25 @@
 use nvim_rs::{
-  compat::tokio::Compat, create::tokio as create, neovim::Neovim, Handler,
+  compat::tokio::Compat,
+  create::tokio as create,
+  neovim::Neovim,
+  Handler,
 };
 
 use async_trait::async_trait;
 
 use rmpv::Value;
 
-use std::sync::Arc;
+use std::{
+  sync::Arc,
+  path::Path,
+};
 
 use tokio::{
   self,
   process::{ChildStdin, Command},
-  spawn,
+  sync::Mutex,
+  spawn
 };
-
-use futures::lock::Mutex;
-use futures::select;
-use futures::future::FutureExt;
 
 const NVIMPATH: &str = "neovim/build/bin/nvim";
 
@@ -106,7 +109,7 @@ impl Handler for NeovimHandler {
   }
 }
 
-#[tokio::main(basic_scheduler)]
+#[tokio::main]
 async fn main() {
   let rs = r#"exe ":fun M(timer) 
       call rpcnotify(1, 'set_froodle', rpcrequest(1, 'req', 'y'))
@@ -120,8 +123,13 @@ async fn main() {
     froodle: froodle.clone(),
   };
 
-  let (nvim, io, methods, _child) = create::new_child_cmd(
-    Command::new(NVIMPATH).args(&[
+  let path = if Path::new(NVIMPATH).exists() {
+    NVIMPATH
+  } else {
+    "nvim"
+  };
+  let (nvim, io, _child) = create::new_child_cmd(
+    Command::new(path).args(&[
       "-u",
       "NONE",
       "--embed",
@@ -145,14 +153,9 @@ async fn main() {
 
   // The 2nd timer closes the channel, which will be returned as an error from
   // the io handler. We only fail the test if we got another error
-  let (name, res) = select! {
-    r_m = methods.fuse() => ("methods", r_m),
-    r_io = io.fuse() => ("io", r_io),
-  };
-
-  if let Err(err) = res {
+  if let Err(err) = io.await.unwrap() {
     if !err.is_channel_closed() {
-      panic!("Error in task '{}': '{:?}'", name, err);
+      panic!("Error in io: '{:?}'", err);
     }
   }
 

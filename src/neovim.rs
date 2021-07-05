@@ -108,9 +108,10 @@ where
 
     let (sender, receiver) = unbounded();
     let fut = future::try_join(
-      Self::io_loop(reader, sender, req.clone()),
-      req.clone().handle_rec(handler, receiver)
-    ).map_ok(|_| ());
+      req.clone().io_loop(reader, sender),
+      req.clone().handler_loop(handler, receiver)
+    )
+    .map_ok(|_| ());
 
     (req, fut)
   }
@@ -131,14 +132,11 @@ where
     let (sender, receiver) = oneshot::channel();
 
     let mut q = self.queue.lock().await;
-    //eprintln!("[Id {}]: Queue before push: {:#?}", msgid, q);
     q.push((msgid, sender));
-    //eprintln!("[Id {}]: Queue after push: {:#?}", msgid, q);
 
     let writer = self.writer.clone();
     model::encode(writer, req).await?;
 
-    //eprintln!("[Id {}]: Receiver before return: {:#?}", msgid, receiver);
     Ok(receiver)
   }
 
@@ -152,7 +150,6 @@ where
       .await
       .map_err(|e| CallError::SendError(*e, method.to_string()))?;
 
-    //eprintln!("Receiver before await: {:#?}", receiver);
     match receiver.await {
       // Result<Result<Result<Value, Value>, Arc<DecodeError>>, RecvError>
       Ok(Ok(r)) => Ok(r), // r is Result<Value, Value>, i.e. we got an answer
@@ -194,7 +191,7 @@ where
     }
   }
 
-  async fn handle_rec<H>(
+  async fn handler_loop<H>(
     self,
     handler: H,
     mut receiver: UnboundedReceiver<RpcMessage>,
@@ -203,54 +200,58 @@ where
     H: Handler<Writer = W> + Spawner,
   {
     loop {
-      let msg = receiver.next().await.unwrap();
+      let msg = match receiver.next().await {
+        Some(msg) => msg,
+        None => break Ok(()),
+      };
 
-      if let RpcMessage::RpcRequest {
-        msgid,
-        method,
-        params,
-      } = msg
-      {
-        let handler_c = handler.clone();
-        let neovim = self.clone();
-        let writer = self.writer.clone();
+      match msg {
+        RpcMessage::RpcRequest {
+          msgid,
+          method,
+          params,
+        } => {
+          let handler_c = handler.clone();
+          let neovim = self.clone();
+          let writer = self.writer.clone();
 
-        handler.spawn(async move {
-          let response = match handler_c
-            .handle_request(method, params, neovim)
-            .await
-          {
-            Ok(result) => RpcMessage::RpcResponse {
-              msgid,
-              result,
-              error: Value::Nil,
-            },
-            Err(error) => RpcMessage::RpcResponse {
-              msgid,
-              result: Value::Nil,
-              error,
-            },
-          };
+          handler.spawn(async move {
+            let response = match handler_c
+              .handle_request(method, params, neovim)
+              .await
+              {
+                Ok(result) => RpcMessage::RpcResponse {
+                  msgid,
+                  result,
+                  error: Value::Nil,
+                },
+                Err(error) => RpcMessage::RpcResponse {
+                  msgid,
+                  result: Value::Nil,
+                  error,
+                },
+              };
 
-          model::encode(writer, response)
-            .await
-            .unwrap_or_else(|e| {
-              error!("Error sending response to request {}: '{}'", msgid, e);
-            });
-        });
-      } else if let RpcMessage::RpcNotification { method, params } = msg {
-        let neovim = self.clone();
-        handler.handle_notify(method, params, neovim).await;
-      } else {
-        unreachable!()
+            model::encode(writer, response)
+              .await
+              .unwrap_or_else(|e| {
+                error!("Error sending response to request {}: '{}'", msgid, e);
+              });
+          });
+        },
+        RpcMessage::RpcNotification {
+          method,
+          params
+        } => handler.handle_notify(method, params, self.clone()).await,
+        _ => unreachable!(),
       }
     }
   }
 
   async fn io_loop<R>(
+    self,
     mut reader: R,
     mut sender: UnboundedSender<RpcMessage>,
-    neovim: Neovim<W>,
   ) -> Result<(), Box<LoopError>>
   where
     R: AsyncRead + Send + Unpin + 'static,
@@ -261,19 +262,14 @@ where
       let msg = match model::decode(&mut reader, &mut rest).await {
         Ok(msg) => msg,
         Err(err) => {
-          let e = neovim.send_error_to_callers(&neovim.queue, *err).await?;
+          let e = self.send_error_to_callers(&self.queue, *err).await?;
           return Err(Box::new(LoopError::DecodeError(e, None)));
         }
       };
 
       debug!("Get message {:?}", msg);
-      if let RpcMessage::RpcResponse {
-          msgid,
-          result,
-          error,
-      } = msg {
-        let sender = find_sender(&neovim.queue, msgid).await?;
-        //eprintln!("Sender: {:?}", sender);
+      if let RpcMessage::RpcResponse { msgid, result, error, } = msg {
+        let sender = find_sender(&self.queue, msgid).await?;
         if error == Value::Nil {
           sender
             .send(Ok(Ok(result)))
@@ -284,11 +280,10 @@ where
             .map_err(|r| (msgid, r.expect("This was an OK(_)")))?;
         }
       } else if let Err(e) = sender.send(msg).await {
-        if e.is_disconnected() {
-          break Ok(());
-        } else {
-          panic!("Unexpected error while sending incoming event to handler: {}", e.to_string());
-        }
+        panic!(
+          "Unexpected error while sending incoming event to handler: {}",
+          e.to_string()
+        );
       }
     }
   }
@@ -327,18 +322,14 @@ async fn find_sender(
   queue: &Queue,
   msgid: u64,
 ) -> Result<oneshot::Sender<ResponseResult>, Box<LoopError>> {
-  //eprintln!("Looking for sender for id {}", msgid);
   let mut queue = queue.lock().await;
 
   let pos = match queue.iter().position(|req| req.0 == msgid) {
     Some(p) => p,
     None => return Err(msgid.into()),
   };
-  //eprintln!( "Found sender at pos {}, queue length was {}", pos, queue.len());
 
-  //eprintln!("[Id {}]: Queue before sender removal: {:#?}", msgid, queue);
   let q = queue.remove(pos).1;
-  //eprintln!("[Id {}]: Queue after sender removal: {:#?}", msgid, queue);
   Ok(q)
 }
 
