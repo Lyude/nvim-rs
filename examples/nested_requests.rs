@@ -109,7 +109,7 @@ impl Handler for NeovimHandler {
   }
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
   let rs = r#"exe ":fun M(timer) 
       call rpcnotify(1, 'set_froodle', rpcrequest(1, 'req', 'y'))
