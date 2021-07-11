@@ -18,7 +18,10 @@ use futures::lock::Mutex;
 use futures::select;
 use futures::future::FutureExt;
 
-const NVIMPATH: &str = "neovim/build/bin/nvim";
+// This works, but I can't find a way to do something similar in
+// connecting/conns.rs so I can use common there as well
+mod common;
+use crate::common::*;
 
 #[derive(Clone)]
 struct NeovimHandler {
@@ -121,7 +124,7 @@ async fn nested_requests() {
   };
 
   let (nvim, io_handler, _child) = create::new_child_cmd(
-    Command::new(NVIMPATH).args(&[
+    Command::new(nvim_path()).args(&[
       "-u",
       "NONE",
       "--embed",
