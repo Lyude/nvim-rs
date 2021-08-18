@@ -9,8 +9,8 @@ const TESTFILE: &str = "neovim-basic-test/curbuf.txt";
 #[test]
 fn basic() {
   let c1 = format!(
-    "let jobid = jobstart([\"target/debug/examples/basic\",\
-                    \"{}\"], {{\"rpc\": v:true}})",
+    "let jobid = jobstart([\"{}\", \"{}\"], {{\"rpc\": v:true}})",
+    PathBuf::from(env!("EXAMPLES_PATH")).join("basic").to_str().unwrap(),
     TESTFILE
   );
   let c2 = r#"sleep 100m | let pong = rpcrequest(jobid, "ping")"#;
